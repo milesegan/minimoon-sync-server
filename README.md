@@ -4,6 +4,20 @@ Standalone LAN file sharing server for Minimoon Sync.
 
 ## CLI
 
+Install from crates.io:
+
+```sh
+cargo install minimoon-sync-server
+```
+
+Run the server:
+
+```sh
+minimoon-sync-server /path/to/music
+```
+
+Run directly from a source checkout:
+
 ```sh
 cargo run -- /path/to/music
 ```
@@ -57,7 +71,14 @@ It excludes hidden files/directories and common Windows metadata files:
 
 ```toml
 [dependencies]
-minimoon-sync-server = { git = "https://github.com/milesegan/minimoon-sync-server.git", tag = "v0.1.0" }
+minimoon-sync-server = "0.1"
 ```
 
 The library exposes `ServerConfig`, `run_server`, `list_files`, `preferred_bind_ip`, and the existing `FileInfo` JSON shape used by Minimoon Sync.
+
+For unreleased changes, depend on Git directly:
+
+```toml
+[dependencies]
+minimoon-sync-server = { git = "https://github.com/milesegan/minimoon-sync-server.git" }
+```

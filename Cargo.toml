@@ -1,9 +1,13 @@
 [package]
 name = "minimoon-sync-server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Standalone LAN file sharing server for Minimoon Sync"
 license = "MIT"
+repository = "https://github.com/milesegan/minimoon-sync-server"
+readme = "README.md"
+keywords = ["sync", "music", "lan", "server"]
+categories = ["command-line-utilities", "web-programming::http-server"]
 
 [lib]
 name = "minimoon_sync_server"
