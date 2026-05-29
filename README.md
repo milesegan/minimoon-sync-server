@@ -27,7 +27,7 @@ The default listening port is `41324`.
 ```
 
 - `GET /file-by-path?path=Album%2Ftrack.mp3` downloads a syncable file by relative path.
-- `GET /file/...` serves files from the shared directory.
+- `GET /file/...` serves files from the shared directory. This legacy endpoint is deprecated and will be removed in a future update. Use `/file-by-path?path=...` for all new clients.
 
 ## Syncable Files
 

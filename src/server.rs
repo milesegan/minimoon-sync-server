@@ -143,14 +143,17 @@ async fn download_file_query_handler(
 }
 
 pub fn build_router(config: ServerConfig) -> Router {
-    let serve_dir_from_dist = ServeDir::new(config.root_dir.clone());
+    // Deprecated: retained for older clients that still request /file/<path>.
+    // New clients should download through /file-by-path?path=..., and this route
+    // will be removed in a future update.
+    let deprecated_file_service = ServeDir::new(config.root_dir.clone());
 
     let files_dir = config.root_dir.clone();
     let files_selected_paths = config.selected_roots.clone();
     let query_dir = config.root_dir;
 
     Router::new()
-        .nest_service("/file", serve_dir_from_dist)
+        .nest_service("/file", deprecated_file_service)
         .route(
             "/file-by-path",
             get(move |query| download_file_query_handler(query_dir.clone(), query)),
