@@ -2,9 +2,15 @@ use anyhow::{bail, Context, Result};
 use minimoon_sync_server::{preferred_bind_ip, run_server, ServerConfig};
 use std::path::PathBuf;
 use tokio::sync::oneshot;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")),
+        )
+        .init();
     let root_dir = parse_root_dir(std::env::args().skip(1))?;
     let ip = preferred_bind_ip()?;
     let hostname = gethostname::gethostname().to_string_lossy().into_owned();

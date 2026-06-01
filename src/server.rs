@@ -1,16 +1,17 @@
 use crate::data::{list_files, resolve_syncable_file_path};
 use crate::network;
 use anyhow::Result;
-use axum::extract::Query;
+use axum::extract::RawQuery;
 use axum::http::{header, Method, StatusCode};
 use axum::{response::IntoResponse, routing::get, Json, Router};
-use serde::Deserialize;
+use percent_encoding::percent_decode_str;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::oneshot::{Receiver, Sender};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::{services::ServeDir, trace::TraceLayer};
+use tracing::{debug, warn};
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
@@ -37,11 +38,6 @@ impl ServerConfig {
         self.port = port;
         self
     }
-}
-
-#[derive(Deserialize)]
-struct FilePathQuery {
-    path: String,
 }
 
 async fn shutdown_signal(signal: Receiver<bool>) {
@@ -127,18 +123,43 @@ async fn list_files_handler(dir_path: PathBuf, selected_paths: Vec<String>) -> i
     Json(files)
 }
 
+fn extract_path_param(raw_query: Option<&str>) -> Option<String> {
+    // Parse `path=...` from the raw query string using pure percent-decoding.
+    // We deliberately avoid form-decoding (which maps `+` → space) because
+    // filenames can legitimately contain `+` characters.
+    raw_query?.split('&').find_map(|kv| {
+        let value = kv.strip_prefix("path=")?;
+        Some(percent_decode_str(value).decode_utf8_lossy().into_owned())
+    })
+}
+
 async fn download_file_query_handler(
     dir_path: PathBuf,
-    Query(query): Query<FilePathQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
-    let resolved_path = match resolve_syncable_file_path(&dir_path, &query.path) {
+    let path = match extract_path_param(raw_query.as_deref()) {
+        Some(p) => p,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    debug!("download request for path: {:?}", path);
+    let resolved_path = match resolve_syncable_file_path(&dir_path, &path) {
         Ok(path) => path,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            warn!("download rejected for {:?}: {}", path, e);
+            return StatusCode::NOT_FOUND.into_response();
+        }
     };
 
     match tokio::fs::read(&resolved_path).await {
-        Ok(data) => ([(header::CONTENT_TYPE, "application/octet-stream")], data).into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+        Ok(data) => {
+            debug!("serving {} bytes from {:?}", data.len(), resolved_path);
+            ([(header::CONTENT_TYPE, "application/octet-stream")], data).into_response()
+        }
+        Err(e) => {
+            warn!("failed to read file {:?}: {}", resolved_path, e);
+            StatusCode::NOT_FOUND.into_response()
+        }
     }
 }
 
@@ -166,7 +187,7 @@ pub fn build_router(config: ServerConfig) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_router, run_server, ServerConfig};
+    use super::{build_router, extract_path_param, run_server, ServerConfig};
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use std::fs;
@@ -184,6 +205,28 @@ mod tests {
         path
     }
 
+    #[test]
+    fn extract_path_param_treats_plus_as_literal() {
+        assert_eq!(
+            extract_path_param(Some("path=A+B.mp3")),
+            Some("A+B.mp3".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_path_param_percent_decodes_spaces() {
+        assert_eq!(
+            extract_path_param(Some("path=A%20B.mp3")),
+            Some("A B.mp3".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_path_param_handles_missing_path_key() {
+        assert_eq!(extract_path_param(Some("other=foo")), None);
+        assert_eq!(extract_path_param(None), None);
+    }
+
     #[tokio::test]
     async fn file_by_path_returns_file_contents_for_encoded_query_paths() {
         let root = temp_test_dir("download");
@@ -195,6 +238,26 @@ mod tests {
         let app = build_router(ServerConfig::new(&root));
         let request: Request<Body> = Request::builder()
             .uri("/file-by-path?path=Albums%2Ftrack%20%231%3F.opus")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"hello");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn file_by_path_treats_plus_as_literal_not_space() {
+        let root = temp_test_dir("plus");
+        fs::write(root.join("A+B.mp3"), "hello").unwrap();
+
+        let app = build_router(ServerConfig::new(&root));
+        // `+` in the query value must resolve to the file named "A+B.mp3",
+        // not "A B.mp3" (which would be the form-decode interpretation).
+        let request: Request<Body> = Request::builder()
+            .uri("/file-by-path?path=A+B.mp3")
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();

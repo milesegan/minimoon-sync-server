@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::{fs, time::UNIX_EPOCH};
+use tracing::debug;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FileInfo {
@@ -96,11 +97,15 @@ pub fn syncable_content_type(path: &Path) -> Option<&'static str> {
 }
 
 pub fn resolve_syncable_file_path(dir: &Path, relative_path: &str) -> Result<PathBuf> {
+    debug!("resolving path: {:?}", relative_path);
+
     if relative_path.is_empty() {
+        debug!("rejected: path is empty");
         anyhow::bail!("path cannot be empty");
     }
 
     if path_has_hidden_component(Path::new(relative_path)) {
+        debug!("rejected: path has hidden component: {:?}", relative_path);
         anyhow::bail!("hidden paths are not syncable");
     }
 
@@ -108,32 +113,51 @@ pub fn resolve_syncable_file_path(dir: &Path, relative_path: &str) -> Result<Pat
     for component in Path::new(relative_path).components() {
         match component {
             Component::Normal(part) => resolved_path.push(part),
-            _ => anyhow::bail!("path must be a relative child of the shared directory"),
+            _ => {
+                debug!(
+                    "rejected: non-normal path component {:?} in {:?}",
+                    component.as_os_str(),
+                    relative_path
+                );
+                anyhow::bail!("path must be a relative child of the shared directory");
+            }
         }
     }
 
     if !resolved_path.is_file() {
+        debug!("rejected: not a file on disk: {:?}", resolved_path);
         anyhow::bail!("path does not point to a file");
     }
 
     if path_has_hidden_attribute(&resolved_path) {
+        debug!("rejected: hidden file attribute: {:?}", resolved_path);
         anyhow::bail!("hidden paths are not syncable");
     }
 
     if !file_is_syncable(&resolved_path) {
+        debug!("rejected: not a syncable file type: {:?}", resolved_path);
         anyhow::bail!("path is not syncable");
     }
 
     let canonical_dir = dir.canonicalize()?;
     let canonical_path = resolved_path.canonicalize()?;
     if !canonical_path.starts_with(&canonical_dir) {
+        debug!(
+            "rejected: canonical path {:?} escapes shared dir {:?}",
+            canonical_path, canonical_dir
+        );
         anyhow::bail!("path must stay inside the shared directory");
     }
 
     if !file_is_syncable(&canonical_path) {
+        debug!(
+            "rejected: canonical path not syncable: {:?}",
+            canonical_path
+        );
         anyhow::bail!("path is not syncable");
     }
 
+    debug!("resolved ok: {:?}", canonical_path);
     Ok(canonical_path)
 }
 
