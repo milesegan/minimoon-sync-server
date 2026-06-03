@@ -227,6 +227,24 @@ mod tests {
         assert_eq!(extract_path_param(None), None);
     }
 
+    #[test]
+    fn extract_path_param_finds_path_key_not_first() {
+        assert_eq!(
+            extract_path_param(Some("other=foo&path=test.mp3")),
+            Some("test.mp3".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_path_param_percent_decodes_equals_in_filename() {
+        // "a=b.mp3" encoded as "a%3Db.mp3" — we decode *after*
+        // splitting on '=', so the real '=' in the filename is preserved.
+        assert_eq!(
+            extract_path_param(Some("path=a%3Db.mp3")),
+            Some("a=b.mp3".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn file_by_path_returns_file_contents_for_encoded_query_paths() {
         let root = temp_test_dir("download");
@@ -274,6 +292,22 @@ mod tests {
         let app = build_router(ServerConfig::new(&root));
         let request: Request<Body> = Request::builder()
             .uri("/file-by-path?path=..%2Fsecret.opus")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), 404);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn file_by_path_rejects_empty_path_value() {
+        let root = temp_test_dir("empty-path");
+        fs::write(root.join("track.mp3"), "hello").unwrap();
+
+        let app = build_router(ServerConfig::new(&root));
+        let request: Request<Body> = Request::builder()
+            .uri("/file-by-path?path=")
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();

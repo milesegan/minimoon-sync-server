@@ -6,12 +6,25 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    let positional_args: Vec<String> = args
+        .into_iter()
+        .skip(1)
+        .filter(|a| a != "--verbose" && a != "-v")
+        .collect();
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            if verbose {
+                EnvFilter::new("debug")
+            } else {
+                EnvFilter::new("warn")
+            }
+        }))
         .init();
-    let root_dir = parse_root_dir(std::env::args().skip(1))?;
+
+    let root_dir = parse_root_dir(positional_args)?;
     let ip = preferred_bind_ip()?;
     let hostname = gethostname::gethostname().to_string_lossy().into_owned();
     let config = ServerConfig::new(root_dir.clone());
@@ -50,11 +63,11 @@ async fn main() -> Result<()> {
 fn parse_root_dir(args: impl IntoIterator<Item = String>) -> Result<PathBuf> {
     let mut args = args.into_iter();
     let Some(path) = args.next() else {
-        bail!("usage: minimoon-sync-server <directory>");
+        bail!("usage: minimoon-sync-server [--verbose] <directory>");
     };
 
     if args.next().is_some() {
-        bail!("usage: minimoon-sync-server <directory>");
+        bail!("usage: minimoon-sync-server [--verbose] <directory>");
     }
 
     let path = PathBuf::from(path);

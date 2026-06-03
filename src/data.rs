@@ -142,11 +142,24 @@ pub fn resolve_syncable_file_path(dir: &Path, relative_path: &str) -> Result<Pat
     let canonical_dir = dir.canonicalize()?;
     let canonical_path = resolved_path.canonicalize()?;
     if !canonical_path.starts_with(&canonical_dir) {
-        debug!(
-            "rejected: canonical path {:?} escapes shared dir {:?}",
-            canonical_path, canonical_dir
+        // Allow escape when the first path component is a directory symlink placed
+        // intentionally in the root (e.g. an artist folder symlinked from another library).
+        // File symlinks pointing outside are still rejected.
+        let first_component = Path::new(relative_path).components().next();
+        let via_top_level_dir_symlink = matches!(
+            first_component,
+            Some(Component::Normal(c)) if {
+                let p = dir.join(c);
+                p.is_symlink() && p.is_dir()
+            }
         );
-        anyhow::bail!("path must stay inside the shared directory");
+        if !via_top_level_dir_symlink {
+            debug!(
+                "rejected: canonical path {:?} escapes shared dir {:?}",
+                canonical_path, canonical_dir
+            );
+            anyhow::bail!("path must stay inside the shared directory");
+        }
     }
 
     if !file_is_syncable(&canonical_path) {
@@ -270,6 +283,25 @@ mod tests {
         let error = resolve_syncable_file_path(&root, "linked.mp3").unwrap_err();
 
         assert!(error.to_string().contains("inside the shared directory"));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_files_inside_top_level_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_test_dir("symlink-dir-root");
+        let outside = temp_test_dir("symlink-dir-outside");
+        let outside_file = outside.join("track.mp3");
+        fs::write(&outside_file, "test").unwrap();
+        // Symlink an entire directory into root (like an artist folder)
+        symlink(&outside, root.join("Artist")).unwrap();
+
+        let resolved = resolve_syncable_file_path(&root, "Artist/track.mp3").unwrap();
+
+        assert_eq!(resolved, outside_file.canonicalize().unwrap());
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }
