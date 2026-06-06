@@ -2,13 +2,35 @@ use anyhow::{bail, Context, Result};
 use minimoon_sync_server::{preferred_bind_ip, run_server, ServerConfig};
 use std::path::PathBuf;
 use tokio::sync::oneshot;
+use tracing_subscriber::filter::LevelFilter;
+
+const USAGE: &str =
+    "usage: minimoon-sync-server [--verbose] [--allow-top-level-directory-symlinks] <directory>";
+
+#[derive(Debug)]
+struct CliOptions {
+    root_dir: PathBuf,
+    verbose: bool,
+    allow_top_level_directory_symlinks: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let root_dir = parse_root_dir(std::env::args().skip(1))?;
+    let options = parse_args(std::env::args().skip(1))?;
+
+    tracing_subscriber::fmt()
+        .with_max_level(if options.verbose {
+            LevelFilter::DEBUG
+        } else {
+            LevelFilter::OFF
+        })
+        .init();
+
+    let root_dir = options.root_dir;
     let ip = preferred_bind_ip()?;
     let hostname = gethostname::gethostname().to_string_lossy().into_owned();
-    let config = ServerConfig::new(root_dir.clone());
+    let config = ServerConfig::new(root_dir.clone())
+        .with_allow_top_level_directory_symlinks(options.allow_top_level_directory_symlinks);
     let port = config.port;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -41,17 +63,30 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_root_dir(args: impl IntoIterator<Item = String>) -> Result<PathBuf> {
-    let mut args = args.into_iter();
-    let Some(path) = args.next() else {
-        bail!("usage: minimoon-sync-server <directory>");
-    };
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<CliOptions> {
+    let mut root_dir = None;
+    let mut verbose = false;
+    let mut allow_top_level_directory_symlinks = false;
 
-    if args.next().is_some() {
-        bail!("usage: minimoon-sync-server <directory>");
+    for arg in args {
+        match arg.as_str() {
+            "--verbose" | "-v" => verbose = true,
+            "--allow-top-level-directory-symlinks" => {
+                allow_top_level_directory_symlinks = true;
+            }
+            _ if arg.starts_with('-') => bail!(USAGE),
+            _ => {
+                if root_dir.replace(PathBuf::from(arg)).is_some() {
+                    bail!(USAGE);
+                }
+            }
+        }
     }
 
-    let path = PathBuf::from(path);
+    let Some(path) = root_dir else {
+        bail!(USAGE);
+    };
+
     if path.as_os_str().is_empty() {
         bail!("directory cannot be empty");
     }
@@ -60,29 +95,57 @@ fn parse_root_dir(args: impl IntoIterator<Item = String>) -> Result<PathBuf> {
         bail!("directory does not exist: {}", path.display());
     }
 
-    Ok(path)
+    Ok(CliOptions {
+        root_dir: path,
+        verbose,
+        allow_top_level_directory_symlinks,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_root_dir;
+    use super::parse_args;
 
     #[test]
     fn rejects_missing_directory_argument() {
-        let error = parse_root_dir(Vec::new()).unwrap_err();
+        let error = parse_args(Vec::new()).unwrap_err();
         assert!(error.to_string().contains("usage"));
     }
 
     #[test]
     fn rejects_extra_arguments() {
-        let error = parse_root_dir(vec![".".to_string(), "extra".to_string()]).unwrap_err();
+        let error = parse_args(vec![".".to_string(), "extra".to_string()]).unwrap_err();
         assert!(error.to_string().contains("usage"));
     }
 
     #[test]
     fn rejects_nonexistent_directory() {
         let error =
-            parse_root_dir(vec!["/definitely/not/a/minimoon/directory".to_string()]).unwrap_err();
+            parse_args(vec!["/definitely/not/a/minimoon/directory".to_string()]).unwrap_err();
         assert!(error.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn parses_verbose_flag() {
+        let options = parse_args(vec!["--verbose".to_string(), ".".to_string()]).unwrap();
+        assert!(options.verbose);
+        assert_eq!(options.root_dir, std::path::PathBuf::from("."));
+    }
+
+    #[test]
+    fn parses_top_level_directory_symlink_flag() {
+        let options = parse_args(vec![
+            "--allow-top-level-directory-symlinks".to_string(),
+            ".".to_string(),
+        ])
+        .unwrap();
+        assert!(options.allow_top_level_directory_symlinks);
+        assert_eq!(options.root_dir, std::path::PathBuf::from("."));
+    }
+
+    #[test]
+    fn rejects_unknown_flags() {
+        let error = parse_args(vec!["--unknown".to_string(), ".".to_string()]).unwrap_err();
+        assert!(error.to_string().contains("usage"));
     }
 }
