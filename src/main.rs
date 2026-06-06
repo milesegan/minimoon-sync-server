@@ -165,7 +165,7 @@ fn format_count(count: usize) -> String {
 
     for (index, digit) in digits.chars().enumerate() {
         let remaining = digits.len() - index;
-        if index > 0 && remaining % 3 == 0 {
+        if index > 0 && remaining.is_multiple_of(3) {
             formatted.push(',');
         }
         formatted.push(digit);
