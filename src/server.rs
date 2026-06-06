@@ -1,4 +1,6 @@
-use crate::data::{list_files, resolve_syncable_file_path};
+use crate::data::{
+    list_files_with_options, resolve_syncable_file_path_with_options, FileAccessOptions,
+};
 use crate::network;
 use anyhow::Result;
 use axum::extract::RawQuery;
@@ -11,13 +13,14 @@ use std::time::Duration;
 use tokio::sync::oneshot::{Receiver, Sender};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::{services::ServeDir, trace::TraceLayer};
-use tracing::{debug, warn};
+use tracing::debug;
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub root_dir: PathBuf,
     pub selected_roots: Vec<String>,
     pub port: u16,
+    pub allow_top_level_directory_symlinks: bool,
 }
 
 impl ServerConfig {
@@ -26,6 +29,7 @@ impl ServerConfig {
             root_dir: root_dir.into(),
             selected_roots: Vec::new(),
             port: network::listen_port(),
+            allow_top_level_directory_symlinks: false,
         }
     }
 
@@ -37,6 +41,17 @@ impl ServerConfig {
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = port;
         self
+    }
+
+    pub fn with_allow_top_level_directory_symlinks(mut self, allow: bool) -> Self {
+        self.allow_top_level_directory_symlinks = allow;
+        self
+    }
+
+    fn file_access_options(&self) -> FileAccessOptions {
+        FileAccessOptions {
+            allow_top_level_directory_symlinks: self.allow_top_level_directory_symlinks,
+        }
     }
 }
 
@@ -112,8 +127,13 @@ pub async fn run_server(
     Ok(())
 }
 
-async fn list_files_handler(dir_path: PathBuf, selected_paths: Vec<String>) -> impl IntoResponse {
-    let all_files = list_files(dir_path).expect("can't list files");
+async fn list_files_handler(
+    dir_path: PathBuf,
+    selected_paths: Vec<String>,
+    file_access_options: FileAccessOptions,
+) -> impl IntoResponse {
+    let all_files =
+        list_files_with_options(dir_path, file_access_options).expect("can't list files");
     let files = all_files
         .into_iter()
         .filter(|f| {
@@ -135,6 +155,7 @@ fn extract_path_param(raw_query: Option<&str>) -> Option<String> {
 
 async fn download_file_query_handler(
     dir_path: PathBuf,
+    file_access_options: FileAccessOptions,
     RawQuery(raw_query): RawQuery,
 ) -> impl IntoResponse {
     let path = match extract_path_param(raw_query.as_deref()) {
@@ -143,13 +164,14 @@ async fn download_file_query_handler(
     };
 
     debug!("download request for path: {:?}", path);
-    let resolved_path = match resolve_syncable_file_path(&dir_path, &path) {
-        Ok(path) => path,
-        Err(e) => {
-            warn!("download rejected for {:?}: {}", path, e);
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    };
+    let resolved_path =
+        match resolve_syncable_file_path_with_options(&dir_path, &path, file_access_options) {
+            Ok(path) => path,
+            Err(e) => {
+                debug!("download rejected for {:?}: {}", path, e);
+                return StatusCode::NOT_FOUND.into_response();
+            }
+        };
 
     match tokio::fs::read(&resolved_path).await {
         Ok(data) => {
@@ -157,7 +179,7 @@ async fn download_file_query_handler(
             ([(header::CONTENT_TYPE, "application/octet-stream")], data).into_response()
         }
         Err(e) => {
-            warn!("failed to read file {:?}: {}", resolved_path, e);
+            debug!("failed to read file {:?}: {}", resolved_path, e);
             StatusCode::NOT_FOUND.into_response()
         }
     }
@@ -169,6 +191,7 @@ pub fn build_router(config: ServerConfig) -> Router {
     // will be removed in a future update.
     let deprecated_file_service = ServeDir::new(config.root_dir.clone());
 
+    let file_access_options = config.file_access_options();
     let files_dir = config.root_dir.clone();
     let files_selected_paths = config.selected_roots.clone();
     let query_dir = config.root_dir;
@@ -177,11 +200,19 @@ pub fn build_router(config: ServerConfig) -> Router {
         .nest_service("/file", deprecated_file_service)
         .route(
             "/file-by-path",
-            get(move |query| download_file_query_handler(query_dir.clone(), query)),
+            get(move |query| {
+                download_file_query_handler(query_dir.clone(), file_access_options, query)
+            }),
         )
         .route(
             "/files",
-            get(move || list_files_handler(files_dir.clone(), files_selected_paths.clone())),
+            get(move || {
+                list_files_handler(
+                    files_dir.clone(),
+                    files_selected_paths.clone(),
+                    file_access_options,
+                )
+            }),
         )
 }
 
@@ -314,6 +345,53 @@ mod tests {
 
         assert_eq!(response.status(), 404);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_by_path_rejects_top_level_directory_symlinks_by_default() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_test_dir("symlink-default");
+        let outside = temp_test_dir("symlink-default-outside");
+        fs::write(outside.join("track.mp3"), "hello").unwrap();
+        symlink(&outside, root.join("Artist")).unwrap();
+
+        let app = build_router(ServerConfig::new(&root));
+        let request: Request<Body> = Request::builder()
+            .uri("/file-by-path?path=Artist%2Ftrack.mp3")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), 404);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_by_path_allows_top_level_directory_symlinks_when_enabled() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_test_dir("symlink-enabled");
+        let outside = temp_test_dir("symlink-enabled-outside");
+        fs::write(outside.join("track.mp3"), "hello").unwrap();
+        symlink(&outside, root.join("Artist")).unwrap();
+
+        let app =
+            build_router(ServerConfig::new(&root).with_allow_top_level_directory_symlinks(true));
+        let request: Request<Body> = Request::builder()
+            .uri("/file-by-path?path=Artist%2Ftrack.mp3")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"hello");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[tokio::test]
