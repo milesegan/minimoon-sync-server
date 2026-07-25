@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use minimoon_sync_server::{
-    list_files_with_options, preferred_bind_ip, run_server, FileAccessOptions, FileInfo,
+    iter_files_with_options, preferred_bind_ip, run_server, FileAccessOptions, FileInfo,
     ServerConfig,
 };
 use std::io::IsTerminal;
@@ -41,8 +41,10 @@ async fn main() -> Result<()> {
     let file_access_options = FileAccessOptions {
         allow_top_level_directory_symlinks: options.allow_top_level_directory_symlinks,
     };
-    let shared_files = list_files_with_options(root_dir.clone(), file_access_options)
-        .context("failed to list shared files")?;
+    let shared_files = iter_files_with_options(root_dir.clone(), file_access_options)
+        .context("failed to list shared files")?
+        .collect::<Result<Vec<_>>>()
+        .context("failed to read shared file metadata")?;
     let shared_summary = summarize_files(&shared_files);
     let config = ServerConfig::new(root_dir.clone())
         .with_allow_top_level_directory_symlinks(options.allow_top_level_directory_symlinks);

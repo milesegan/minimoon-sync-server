@@ -1,5 +1,5 @@
 use crate::data::{
-    list_files_with_options, resolve_syncable_file_path_with_options, FileAccessOptions,
+    iter_files_with_options, resolve_syncable_file_path_with_options, FileAccessOptions,
 };
 use crate::network;
 use anyhow::Result;
@@ -132,10 +132,9 @@ async fn list_files_handler(
     selected_paths: Vec<String>,
     file_access_options: FileAccessOptions,
 ) -> impl IntoResponse {
-    let all_files =
-        list_files_with_options(dir_path, file_access_options).expect("can't list files");
-    let files = all_files
-        .into_iter()
+    let files = iter_files_with_options(dir_path, file_access_options)
+        .expect("can't list files")
+        .map(|file| file.expect("can't read file metadata"))
         .filter(|f| {
             selected_paths.is_empty() || selected_paths.iter().any(|p| f.path.starts_with(p))
         })

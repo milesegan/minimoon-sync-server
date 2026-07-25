@@ -1,7 +1,7 @@
 #![allow(clippy::items_after_test_module)]
 
 use anyhow::Result;
-use glob::glob;
+use glob::{glob, Paths};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -191,7 +191,7 @@ fn via_top_level_directory_symlink(dir: &Path, relative_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        file_is_syncable, list_files, list_files_with_options, resolve_syncable_file_path,
+        file_is_syncable, iter_files, iter_files_with_options, resolve_syncable_file_path,
         resolve_syncable_file_path_with_options, syncable_content_type, FileAccessOptions,
     };
     use std::fs;
@@ -251,10 +251,31 @@ mod tests {
         fs::create_dir_all(&hidden_dir).unwrap();
         fs::write(hidden_dir.join("track.mp3"), "hidden").unwrap();
 
-        let files = list_files(root.to_string_lossy().into_owned()).unwrap();
+        let files = iter_files(root.to_string_lossy().into_owned())
+            .unwrap()
+            .collect::<anyhow::Result<Vec<_>>>()
+            .unwrap();
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "visible.mp3");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn iterates_over_file_info() {
+        let root = temp_test_dir("stream-list");
+        fs::write(root.join("first.mp3"), "first").unwrap();
+        fs::write(root.join("second.mp3"), "second").unwrap();
+        let mut paths = Vec::new();
+
+        paths.extend(
+            iter_files(root.to_string_lossy().into_owned())
+                .unwrap()
+                .map(|file| file.unwrap().path),
+        );
+
+        paths.sort();
+        assert_eq!(paths, ["first.mp3", "second.mp3"]);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -425,7 +446,10 @@ mod tests {
         fs::write(outside.join("track.mp3"), "test").unwrap();
         symlink(&outside, root.join("Artist")).unwrap();
 
-        let files = list_files(root.to_string_lossy().into_owned()).unwrap();
+        let files = iter_files(root.to_string_lossy().into_owned())
+            .unwrap()
+            .collect::<anyhow::Result<Vec<_>>>()
+            .unwrap();
 
         assert!(files.is_empty());
         let _ = fs::remove_dir_all(root);
@@ -442,12 +466,14 @@ mod tests {
         fs::write(outside.join("track.mp3"), "test").unwrap();
         symlink(&outside, root.join("Artist")).unwrap();
 
-        let files = list_files_with_options(
+        let files = iter_files_with_options(
             root.to_string_lossy().into_owned(),
             FileAccessOptions {
                 allow_top_level_directory_symlinks: true,
             },
         )
+        .unwrap()
+        .collect::<anyhow::Result<Vec<_>>>()
         .unwrap();
 
         assert_eq!(files.len(), 1);
@@ -468,45 +494,66 @@ fn file_info(dir: &Path, path: &Path) -> Result<FileInfo> {
     })
 }
 
-pub fn list_files(dir: impl Into<PathBuf>) -> Result<Vec<FileInfo>> {
-    list_files_with_options(dir, FileAccessOptions::default())
+pub struct FileInfoIter {
+    root_path: PathBuf,
+    entries: Option<Paths>,
+    options: FileAccessOptions,
 }
 
-pub fn list_files_with_options(
-    dir: impl Into<PathBuf>,
-    options: FileAccessOptions,
-) -> Result<Vec<FileInfo>> {
-    let root_path = dir.into();
-    if root_path.as_os_str().is_empty() {
-        return Ok(Vec::new());
-    }
+impl Iterator for FileInfoIter {
+    type Item = Result<FileInfo>;
 
-    let mut file_infos = Vec::<FileInfo>::new();
-    let pattern = format!("{}/**/*", root_path.to_string_lossy());
-
-    for entry in glob(&pattern).expect("Failed to read glob pattern") {
-        match entry {
-            Ok(path) => {
-                let relative_path = path.strip_prefix(&root_path)?;
-                let relative_path_string = relative_path.to_string_lossy();
-                if path.is_file()
-                    && !path_has_hidden_component(relative_path)
-                    && !path_has_hidden_attribute(path.as_path())
-                    && file_is_syncable(path.as_path())
-                    && resolve_syncable_file_path_with_options(
-                        &root_path,
-                        relative_path_string.as_ref(),
-                        options,
-                    )
-                    .is_ok()
-                {
-                    let info = file_info(&root_path, path.as_path())?;
-                    file_infos.push(info);
+    fn next(&mut self) -> Option<Self::Item> {
+        let entries = self.entries.as_mut()?;
+        loop {
+            let path = match entries.next()? {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("{error:?}");
+                    continue;
                 }
+            };
+            let relative_path = match path.strip_prefix(&self.root_path) {
+                Ok(path) => path,
+                Err(error) => return Some(Err(error.into())),
+            };
+            let relative_path_string = relative_path.to_string_lossy();
+            if path.is_file()
+                && !path_has_hidden_component(relative_path)
+                && !path_has_hidden_attribute(path.as_path())
+                && file_is_syncable(path.as_path())
+                && resolve_syncable_file_path_with_options(
+                    &self.root_path,
+                    relative_path_string.as_ref(),
+                    self.options,
+                )
+                .is_ok()
+            {
+                return Some(file_info(&self.root_path, path.as_path()));
             }
-            Err(e) => eprintln!("{:?}", e),
         }
     }
+}
 
-    Ok(file_infos)
+pub fn iter_files(dir: impl Into<PathBuf>) -> Result<FileInfoIter> {
+    iter_files_with_options(dir, FileAccessOptions::default())
+}
+
+pub fn iter_files_with_options(
+    dir: impl Into<PathBuf>,
+    options: FileAccessOptions,
+) -> Result<FileInfoIter> {
+    let root_path = dir.into();
+    let entries = if root_path.as_os_str().is_empty() {
+        None
+    } else {
+        let pattern = format!("{}/**/*", root_path.to_string_lossy());
+        Some(glob(&pattern)?)
+    };
+
+    Ok(FileInfoIter {
+        root_path,
+        entries,
+        options,
+    })
 }
