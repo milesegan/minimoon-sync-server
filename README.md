@@ -79,7 +79,7 @@ It excludes hidden files/directories and common Windows metadata files:
 minimoon-sync-server = "0.1"
 ```
 
-The library exposes `ServerConfig`, `run_server`, `list_files`, `preferred_bind_ip`, and the existing `FileInfo` JSON shape used by Minimoon Sync. Library callers can opt into top-level directory symlinks with `ServerConfig::with_allow_top_level_directory_symlinks(true)` or use `FileAccessOptions` with the option-aware path helpers.
+The library exports `ServerConfig`, `run_server`, `iter_files`, `preferred_bind_ip`, and the `FileInfo` JSON shape used by Minimoon Sync. `iter_files` reads entries as they are requested instead of allocating the full list first. To allow top-level directory symlinks, use `ServerConfig::with_allow_top_level_directory_symlinks(true)` or pass `FileAccessOptions` to the option-aware path helpers.
 
 For unreleased changes, depend on Git directly:
 
