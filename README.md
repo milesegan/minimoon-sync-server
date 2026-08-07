@@ -25,6 +25,7 @@ cargo run -- /path/to/music
 The command starts the sharing server, prints a summary table with the number and total size of syncable files, hostname, LAN IP address, and the URL to enter in the iPhone app, then keeps running until Ctrl-C.
 
 The default listening port is `41324`.
+The server listens on all IPv4 interfaces and advertises the preferred private LAN address for the iPhone app.
 
 Optional flags:
 

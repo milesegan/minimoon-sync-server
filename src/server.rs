@@ -7,7 +7,7 @@ use axum::extract::RawQuery;
 use axum::http::{header, Method, StatusCode};
 use axum::{response::IntoResponse, routing::get, Json, Router};
 use percent_encoding::percent_decode_str;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::oneshot::{Receiver, Sender};
@@ -76,8 +76,8 @@ pub async fn run_server(
 
     let app = build_router(config.clone()).layer(cors);
 
-    let addr = match network::preferred_bind_addr_for_port(config.port) {
-        Ok(addr) => addr,
+    let advertised_ip = match network::preferred_bind_ip() {
+        Ok(ip) => ip,
         Err(e) => {
             let message =
                 "Private LAN sharing is unavailable. Connect to Wi-Fi or Ethernet on your local network.".to_string();
@@ -88,26 +88,25 @@ pub async fn run_server(
             return Ok(());
         }
     };
+    let bind_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, config.port));
 
     let listener = loop {
-        match tokio::net::TcpListener::bind(addr).await {
+        match tokio::net::TcpListener::bind(bind_addr).await {
             Ok(listener) => break listener,
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::AddrInUse {
                     eprintln!(
-                        "Port {} on {} in use, retrying in 100ms...",
-                        config.port,
-                        addr.ip()
+                        "Port {} on all IPv4 interfaces is in use, retrying in 100ms...",
+                        config.port
                     );
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
-                eprintln!("Failed to bind to {addr}: {e}");
+                eprintln!("Failed to bind to {bind_addr}: {e}");
                 if let Some(tx) = on_ready {
                     let _ = tx.send(Err(format!(
-                        "Could not start local sharing on {}:{}",
-                        addr.ip(),
-                        config.port
+                        "Could not start local sharing on all IPv4 interfaces at port {}",
+                        config.port,
                     )));
                 }
                 return Ok(());
@@ -116,8 +115,9 @@ pub async fn run_server(
     };
 
     let bound_addr = listener.local_addr()?;
+    let advertised_addr = SocketAddr::from((advertised_ip, bound_addr.port()));
     if let Some(tx) = on_ready {
-        let _ = tx.send(Ok(bound_addr));
+        let _ = tx.send(Ok(advertised_addr));
     }
 
     axum::serve(listener, app.layer(TraceLayer::new_for_http()))
@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_server_serves_files_on_ready_bound_address() {
+    async fn run_server_serves_files_on_advertised_and_loopback_addresses() {
         let root = temp_test_dir("integration");
         fs::write(root.join("track.mp3"), "hello").unwrap();
 
@@ -407,6 +407,7 @@ mod tests {
         ));
 
         let addr = ready_rx.await.unwrap().unwrap();
+        assert!(!addr.ip().is_unspecified());
         let response: Vec<crate::FileInfo> = reqwest::get(format!("http://{addr}/files"))
             .await
             .unwrap()
@@ -416,12 +417,15 @@ mod tests {
         assert_eq!(response.len(), 1);
         assert_eq!(response[0].path, "track.mp3");
 
-        let body = reqwest::get(format!("http://{addr}/file-by-path?path=track.mp3"))
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap();
+        let body = reqwest::get(format!(
+            "http://127.0.0.1:{}/file-by-path?path=track.mp3",
+            addr.port()
+        ))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
         assert_eq!(body.as_ref(), b"hello");
 
         let _ = shutdown_tx.send(true);
